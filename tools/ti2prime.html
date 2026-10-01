@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ti2prime</title>
+<style>
+  :root { color-scheme: light }
+  * { box-sizing: border-box }
+  html, body { height: 100% }
+  body {
+    margin: 0; background: #fff; color: #000;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-bottom: 1px solid #000;
+  }
+  button, label.file {
+    border: 1px solid #000; background: #fff; color: #000;
+    padding: 3px 10px; font: inherit; cursor: pointer;
+  }
+  button:hover:enabled, label.file:hover { background: #000; color: #fff }
+  button:disabled { border-color: #b9b9b9; color: #b9b9b9; cursor: not-allowed }
+  input[type=file] { display: none }
+  #count { margin-left: auto; white-space: nowrap }
+  #errors {
+    border-bottom: 1px solid #000; padding: 8px 10px;
+    max-height: 30vh; overflow: auto; white-space: pre-wrap;
+  }
+  #errors:empty { display: none }
+  textarea {
+    flex: 1; min-height: 0; width: 100%; border: 0; outline: none;
+    padding: 8px 10px; resize: none; background: #fff; color: #000;
+    font: inherit; white-space: pre; tab-size: 2;
+  }
+  #out { border-top: 1px solid #000; background: #fff }
+</style>
+
+<header>
+  <label class="file">选择文件<input type="file" id="file"></label>
+  <button id="dl">下载</button>
+  <span id="count"></span>
+</header>
+<textarea id="in" spellcheck="false" placeholder="TI Lua"></textarea>
+<div id="errors"></div>
+<textarea id="out" spellcheck="false" readonly placeholder="primeLua"></textarea>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// 1. mask comments and strings, so detection never trips on their contents.
+//    The mask keeps every byte offset and every newline, so line numbers stay
+//    exact while scanning the masked text.
+// ---------------------------------------------------------------------------
+// keepStrings = false blanks string CONTENTS too (symbol detection), true keeps
+// them (patterns that look for a literal, like require("ti") or image.new("..."))
+function maskLua(src, keepStrings) {
+  const out = new Array(src.length);
+  let i = 0, state = "code";
+  const isNL = c => c === "\n";
+  const put = (from, to) => { for (let k = from; k < to; k++) out[k] = isNL(src[k]) ? "\n" : " "; };
+  const copy = (from, to) => {
+    if (keepStrings) { for (let k = from; k < to; k++) out[k] = isNL(src[k]) ? "\n" : src[k]; }
+    else put(from, to);
+  };
+
+  while (i < src.length) {
+    const c = src[i], c2 = src[i + 1];
+    if (state === "code") {
+      if (c === "-" && c2 === "-") {
+        let j = i + 2, eq = 0;
+        while (src[j + eq] === "=") eq++;
+        if (src[j + eq] === "[") {                       // long comment
+          const close = "]" + "=".repeat(eq) + "]";
+          const end = src.indexOf(close, j + eq + 1);
+          const stop = end < 0 ? src.length : end + close.length;
+          put(i, stop); i = stop; continue;
+        }
+        const nl = src.indexOf("\n", i);
+        const stop = nl < 0 ? src.length : nl;
+        put(i, stop); i = stop; continue;
+      }
+      if (c === "[") {                                   // long string
+        let eq = 0;
+        while (src[i + 1 + eq] === "=") eq++;
+        if (src[i + 1 + eq] === "[") {
+          const close = "]" + "=".repeat(eq) + "]";
+          const end = src.indexOf(close, i + eq + 2);
+          const stop = end < 0 ? src.length : end + close.length;
+          copy(i, stop); i = stop; continue;
+        }
+      }
+      if (c === '"' || c === "'") {
+        state = c;
+        out[i] = keepStrings ? c : " ";
+        i++;
+        continue;
+      }
+      out[i] = c; i++; continue;
+    }
+    // inside a short string
+    if (c === "\\") {
+      out[i] = keepStrings ? c : " ";
+      if (i + 1 < src.length) out[i + 1] = keepStrings ? src[i + 1] : " ";
+      i += 2; continue;
+    }
+    if (c === state) { out[i] = keepStrings ? c : " "; i++; state = "code"; continue; }
+    copy(i, i + 1); i++;
+  }
+  return out.join("");
+}
+
+function lineIndex(src) {
+  const starts = [0];
+  for (let i = 0; i < src.length; i++) if (src[i] === "\n") starts.push(i + 1);
+  return starts;
+}
+function lineAt(starts, offset) {
+  let lo = 0, hi = starts.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= offset) lo = mid; else hi = mid - 1; }
+  return lo + 1;
+}
+
+// ---------------------------------------------------------------------------
+// 2. what the ti shim on the Prime actually provides
+// ---------------------------------------------------------------------------
+const ON_OK = [
+  "construction", "create",         // create: the older name, an alias in the shim
+  "resize", "activate", "deactivate", "destroy", "paint",
+  "timer", "charIn", "arrowKey", "arrowUp", "arrowDown", "arrowLeft",
+  "arrowRight", "enterKey", "returnKey", "escapeKey", "tabKey", "backspaceKey",
+  "contextMenu", "help", "mouseDown", "mouseUp", "mouseMove", "varChange",
+];
+const GC_OK = [
+  "setColorRGB", "setColor", "setPen", "setFont", "setAlpha",
+  "drawString", "drawLine", "drawRect", "fillRect", "drawCircle",
+  "fillCircle", "drawPolyLine", "drawPolygon", "fillPolygon",
+  "drawArc", "fillArc", "drawImage", "getStringWidth", "getStringHeight",
+  "clipRect",
+];
+const PLATFORM_OK = [
+  "window", "apiLevel", "isColorDisplay", "isDeviceModeRendering",
+  "isTabletModeRendering", "hw", "getString", "withGC", "registerErrorHandler",
+];
+const WINDOW_OK = ["width", "height", "invalidate", "setBackgroundColor", "setFocus"];
+const TIMER_OK = ["start", "stop", "getMilliSecCounter", "getMillisecondsSinceEpoch"];
+const VAR_OK = [
+  "store", "recall", "recallstr", "list", "storeAt", "recallAt",
+  "makeNumericList", "monitor", "unmonitor", "ignore", "unignore",
+  // primeLua extras of the shim, harmless to accept
+  "vars_reset", "vars_load", "vars_forget",
+];
+const IMAGE_OK = ["new", "copy", "width", "height", "rotate", "getPixel", "setPixel"];
+const LOCALE_OK = ["name", "country", "isMetric"];
+const CLIPBOARD_OK = ["addText", "getText", "setText"];
+const COLOR_OK = ["black", "white", "red", "green", "blue", "yellow", "cyan",
+                  "magenta", "gray", "orange", "purple", "brown", "pink",
+                  "lightgray", "darkgray"];
+const KEYS_OK = ["enter", "escape", "esc", "left", "right", "up", "down",
+                 "backspace", "delete", "space", "tab", "help", "menu",
+                 "alpha", "on", "shift", "apps", "plot", "num", "view",
+                 "cas", "symb"];
+const DROPPED = {
+  document: "TI 文档 API（未实现）",
+  cursor: "TI 光标 API（未实现）",
+  d2Editor: "TI 富文本编辑器（未实现）",
+  toolpalette: "TI 工具菜单（未实现）",
+  physics: "TI 物理引擎 Chipmunk（未实现）",
+};
+const UNFAITHFUL = {
+  setfenv: "Lua 5.1 的 setfenv 在 5.4 里没有等价物",
+  getfenv: "Lua 5.1 的 getfenv 在 5.4 里没有等价物",
+  newproxy: "Lua 5.1 的 newproxy 已被移除",
+  module: "Lua 5.1 的 module() 已被移除",
+};
+
+function scan(masked, starts, re, cb) {
+  let m;
+  while ((m = re.exec(masked)) !== null) cb(m, lineAt(starts, m.index));
+}
+
+// ---------------------------------------------------------------------------
+// 3. the Lua 5.1 -> 5.4 shims the converter adds when it sees them used
+// ---------------------------------------------------------------------------
+const SHIMS = {
+  unpack: 'local unpack = table.unpack                  -- 5.1 的 unpack',
+  loadstring: 'local loadstring = loadstring or load      -- 5.1 的 loadstring',
+  gfind: 'string.gfind = string.gfind or string.gmatch  -- 5.0/5.1 的 gfind',
+  pow: 'math.pow = math.pow or function(a, b) return a ^ b end',
+  log10: 'math.log10 = math.log10 or function(x) return math.log(x, 10) end',
+  // math.atan2 EXISTS in Lua 5.4 (the compat-5.3 build defines it as an alias
+  // of math.atan and IGNORES the second argument), so `x or ...` never fires
+  // and every TI script that computes an angle would silently get atan(y).
+  // A local therefore shadows it, with the real two-argument result.
+  atan2: [
+    'local function _atan2(y, x)                      -- 5.1 的 math.atan2(y, x)',
+    '  if x > 0 then return math.atan(y / x)',
+    '  elseif x < 0 then return math.atan(y / x) + (y >= 0 and math.pi or -math.pi)',
+    '  elseif y > 0 then return math.pi / 2',
+    '  elseif y < 0 then return -math.pi / 2',
+    '  else return 0 end',
+    'end',
+    'math.atan2 = _atan2',
+  ].join("\n"),
+  mod: 'math.mod = math.mod or math.fmod',
+  getn: 'table.getn = table.getn or function(t) return #t end',
+  bit: [
+    'local bit = {}                                   -- LuaBitOp 子集（32 位）',
+    'local function n32(x) x = x & 0xFFFFFFFF; if x >= 0x80000000 then x = x - 0x100000000 end; return x end',
+    'function bit.band(a, b, ...) local r = n32(a) & n32(b)',
+    '  for _, v in ipairs({...}) do r = r & n32(v) end return r end',
+    'function bit.bor(a, b, ...) local r = n32(a) | n32(b)',
+    '  for _, v in ipairs({...}) do r = r | n32(v) end return r end',
+    'function bit.bxor(a, b, ...) local r = n32(a) ~ n32(b)',
+    '  for _, v in ipairs({...}) do r = r ~ n32(v) end return r end',
+    'function bit.bnot(a) return n32(~n32(a)) end',
+    'function bit.lshift(a, n) return n32(n32(a) << n) end',
+    'function bit.rshift(a, n) return n32((n32(a) & 0xFFFFFFFF) >> n) end',
+    'function bit.arshift(a, n) return n32(n32(a) >> n) end',
+    'function bit.tobit(a) return n32(a) end',
+    'function bit.tohex(a, n) a = n32(a) & 0xFFFFFFFF',
+    '  local s = string.format("%08x", a); n = n or 8',
+    '  if n < 0 then return s:sub(-n):upper() end return s:sub(1, n) end',
+  ].join("\n"),
+};
+
+// ---------------------------------------------------------------------------
+// 4. the converter
+// ---------------------------------------------------------------------------
+function convert(src) {
+  const errors = [];
+  const starts = lineIndex(src);
+  const masked = maskLua(src, false);        // symbols, comments and strings gone
+  const withStrings = maskLua(src, true);    // comments gone, literals kept
+  const add = (line, msg) => errors.push(line + "  " + msg);
+
+  // --- things the shim does not have -------------------------------------
+  for (const name of Object.keys(DROPPED)) {
+    scan(masked, starts, new RegExp("\\b" + name + "\\b", "g"), (m, ln) => {
+      add(ln, name + " 不可用：" + DROPPED[name]);
+    });
+  }
+  for (const name of Object.keys(UNFAITHFUL)) {
+    scan(masked, starts, new RegExp("\\b" + name + "\\s*\\(", "g"), (m, ln) => {
+      add(ln, name + " 无法转换：" + UNFAITHFUL[name]);
+    });
+  }
+
+  // --- on.* handlers the event loop never calls --------------------------
+  scan(masked, starts, /\bon\s*\.\s*([A-Za-z_]\w*)/g, (m, ln) => {
+    if (ON_OK.indexOf(m[1]) < 0) add(ln, "on." + m[1] + " 不会在 ti.run() 的事件循环里被调用");
+  });
+
+  // --- closed-set libraries: method names must exist in the shim ----------
+  const checkNs = (ns, ok) => {
+    scan(masked, starts, new RegExp("\\b" + ns + "\\s*[.:]\\s*([A-Za-z_]\\w*)", "g"),
+      (m, ln) => { if (ok.indexOf(m[1]) < 0) add(ln, ns + "." + m[1] + " 未实现"); });
+  };
+  checkNs("platform", PLATFORM_OK);
+  checkNs("timer", TIMER_OK);
+  checkNs("var", VAR_OK);
+  checkNs("image", IMAGE_OK);
+  checkNs("locale", LOCALE_OK);
+  checkNs("clipboard", CLIPBOARD_OK);
+  scan(masked, starts, /\bcolor\s*\.\s*([A-Za-z_]\w*)/g,
+    (m, ln) => { if (COLOR_OK.indexOf(m[1]) < 0) add(ln, "color." + m[1] + " 不是已定义的颜色"); });
+  scan(masked, starts, /\bkeys\s*\.\s*([A-Za-z_]\w*)/g,
+    (m, ln) => { if (KEYS_OK.indexOf(m[1]) < 0) add(ln, "keys." + m[1] + " 不是已定义的键名"); });
+  scan(masked, starts, /\bplatform\s*\.\s*window\s*[.:]\s*([A-Za-z_]\w*)/g,
+    (m, ln) => { if (WINDOW_OK.indexOf(m[1]) < 0) add(ln, "platform.window:" + m[1] + " 未实现"); });
+
+  // --- gc methods: find the name the script calls its graphics context ----
+  const gcNames = new Set(["gc"]);
+  scan(masked, starts, /function\s+on\s*\.\s*paint\s*\(\s*([A-Za-z_]\w*)/g, m => gcNames.add(m[1]));
+  scan(masked, starts, /on\s*\.\s*paint\s*=\s*function\s*\(\s*([A-Za-z_]\w*)/g, m => gcNames.add(m[1]));
+  const gcRe = new RegExp("\\b(" + [...gcNames].join("|") + ")\\s*:\\s*([A-Za-z_]\\w*)", "g");
+  scan(masked, starts, gcRe, (m, ln) => {
+    if (GC_OK.indexOf(m[2]) < 0) add(ln, "gc:" + m[2] + " 未实现");
+  });
+
+  // --- the one call the shim refuses at runtime --------------------------
+  scan(withStrings, starts, /\bimage\s*\.\s*new\s*\(\s*["']/g, (m, ln) => {
+    add(ln, "image.new(\"xx\") 是空图，不是解压 TI.Image："
+      + "这条调用会得到一张透明图（Nspire 压缩图像格式没有解码器）。"
+      + "要画自己的图形，用 image.new(w, h) + setPixel");
+  });
+
+  // --- what to insert ----------------------------------------------------
+  const wantRequire = !/require\s*\(\s*["']ti["']\s*\)/.test(withStrings);
+  const handles = ON_OK.some(n => new RegExp("\\bon\\s*\\.\\s*" + n + "\\b").test(masked));
+  const wantRun = handles && !/\bti\s*\.\s*run\b/.test(masked);
+
+  const shims = [];
+  if (/\bunpack\s*\(/.test(masked) && !/\blocal\s+unpack\b/.test(masked)) shims.push(SHIMS.unpack);
+  if (/\bloadstring\s*\(/.test(masked)) shims.push(SHIMS.loadstring);
+  if (/\bstring\s*\.\s*gfind\b/.test(masked)) shims.push(SHIMS.gfind);
+  if (/\bmath\s*\.\s*pow\b/.test(masked)) shims.push(SHIMS.pow);
+  if (/\bmath\s*\.\s*log10\b/.test(masked)) shims.push(SHIMS.log10);
+  if (/\bmath\s*\.\s*atan2\b/.test(masked)) shims.push(SHIMS.atan2);
+  if (/\bmath\s*\.\s*mod\b/.test(masked)) shims.push(SHIMS.mod);
+  if (/\btable\s*\.\s*getn\b/.test(masked)) shims.push(SHIMS.getn);
+  if (/\bbit\s*\./.test(masked)) shims.push(SHIMS.bit);
+
+  // --- assemble: leading comment block stays first, then the additions ----
+  const lines = src.split("\n");
+  let head = 0;
+  while (head < lines.length) {
+    const t = lines[head].trim();
+    if (t === "" || t.startsWith("--")) head++;
+    else break;
+  }
+  const before = lines.slice(0, head);
+  const after = lines.slice(head);
+
+  const insert = [];
+  if (!/converted from TI-Nspire/.test(src)) {      // our own banner, in a comment
+    insert.push("-- converted from TI-Nspire Lua by ti2prime (lib/ti.lua)");
+  }
+  if (wantRequire) insert.push('require("ti")');
+  if (shims.length) insert.push("", shims.join("\n"));
+  if (insert.length) insert.push("");
+
+  let outLines = before.concat(insert, after);
+  if (wantRun) {
+    while (outLines.length && outLines[outLines.length - 1].trim() === "") outLines.pop();
+    outLines.push("", "ti.run()", "");
+  }
+  const code = outLines.join("\n");
+
+  return { code, errors, insertions: {
+    require: wantRequire, run: wantRun, shims: shims.length,
+  } };
+}
+
+// ---------------------------------------------------------------------------
+// 5. the page
+// ---------------------------------------------------------------------------
+// (guarded: the same script is loaded by node in tests/ti2prime_check.js,
+// which has no DOM and only wants convert())
+if (typeof document !== "undefined") {
+  const $in = document.getElementById("in");
+  const $out = document.getElementById("out");
+  const $err = document.getElementById("errors");
+  const $count = document.getElementById("count");
+  const $dl = document.getElementById("dl");
+  let lastName = "converted.lua";
+
+  function render() {
+    const src = $in.value;
+    if (!src.trim()) {
+      $out.value = ""; $err.textContent = ""; $count.textContent = "";
+      $dl.disabled = true; return;
+    }
+    let res;
+    try { res = convert(src); }
+    catch (e) {
+      $out.value = ""; $err.textContent = "转换器错误: " + e.message;
+      $count.textContent = ""; $dl.disabled = true; return;
+    }
+    $out.value = res.code;
+    $err.textContent = res.errors.join("\n");
+    $dl.disabled = res.errors.length > 0;
+    $count.textContent = res.errors.length ? res.errors.length + " 个错误" : "ok";
+  }
+
+  $in.addEventListener("input", render);
+
+  document.getElementById("file").addEventListener("change", ev => {
+    const f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      lastName = f.name.replace(/\.lua$/i, "") + ".prime.lua";
+      $in.value = String(r.result);
+      render();
+    };
+    r.readAsText(f);
+  });
+
+  $dl.addEventListener("click", () => {
+    const blob = new Blob([$out.value], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = lastName;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+
+}
+
+if (typeof module === "object" && module.exports) {
+  module.exports = { convert, maskLua };
+}
+</script>
+</html>

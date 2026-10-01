@@ -1,0 +1,81 @@
+==== timeprobe v0.1 (safe) ====
+[i] facts this probe is testing against: SDKLIB GetSysTime = 'push {r0}; push {lr}; svc 0x100A5'; firmware contains utime_mphal.o
+-- environment --------------------------------------------
+  sys.implementation: 'micropython'
+  import utime     FAIL  ImportError("no module named 'utime'",)
+  import time      FAIL  ImportError("no module named 'time'",)
+  import umachine  FAIL  ImportError("no module named 'umachine'",)
+  import utimeq    ok    (no time names)
+-- MicroPython utime -------------------------------------
+  no utime module (ImportError("no module named 'utime'",)): ticks_ms/time cannot be used here
+-- PPL (hpprime.eval) ------------------------------------
+  Date       -> 2026.0925
+  Time       -> 20.5247222222
+  Ticks      -> 37394.0
+  memory(1)  -> 13595032
+  Ticks      37447.0 -> 38455.0  delta 1008.0  milliseconds per tick  (waited: PPL wait(1))
+[i] svc 0x100A5 NOT probed -- it can reset the calculator:
+[i]   run(risky=True) when you are ready for that
+==== done (safe) ====
+==== timeprobe v0.1 (RISKY: svc 0x100A5 included) ====
+[i] facts this probe is testing against: SDKLIB GetSysTime = 'push {r0}; push {lr}; svc 0x100A5'; firmware contains utime_mphal.o
+-- environment --------------------------------------------
+  sys.implementation: 'micropython'
+  import utime     FAIL  ImportError("no module named 'utime'",)
+  import time      FAIL  ImportError("no module named 'time'",)
+  import umachine  FAIL  ImportError("no module named 'umachine'",)
+  import utimeq    ok    (no time names)
+-- MicroPython utime -------------------------------------
+  no utime module (ImportError("no module named 'utime'",)): ticks_ms/time cannot be used here
+-- PPL (hpprime.eval) ------------------------------------
+  Date       -> 2026.0925
+  Time       -> 20.5322222222
+  Ticks      -> 64979.0
+  memory(1)  -> 13587068
+  Ticks      65100.0 -> 66109.0  delta 1009.0  milliseconds per tick  (waited: PPL wait(1))
+-- svc 0x100A5 GetSysTime (RISKY) ------------------------
+  using a fresh 'debug' handle
+  stub 0x307FC468, buffer 0x305B7830 (64 B, zeroed)
+  calling 0x100A5(buf, 0, 0, 0) ...
+  0x100A5 returned r0 = 0x000007EA (2026)
+  buf words: 000907EA 00190005 001F0014 02A7003A 000128F5 00000000 00000000 00000000
+  buf got data
+  decode: no known layout (raw words above)
+  -> SIGNATURE: gettime(SYSTIME *) writes through r0
+  after a PPL wait(2): r0 = 0x000007EA (2026)
+  buf words: 000907EA 00190005 00200014 00230000 00013216 00000000 00000000 00000000
+  changed words: [2, 3, 4]
+  decoded after the wait: no known layout (raw words above)
+  delta r0 = 0
+==== done (risky) ====
+==== timeprobe v0.1 (RISKY: svc 0x100A5 included) ====
+[i] facts this probe is testing against: SDKLIB GetSysTime = 'push {r0}; push {lr}; svc 0x100A5'; firmware contains utime_mphal.o
+-- environment --------------------------------------------
+  sys.implementation: 'micropython'
+  import utime     FAIL  ImportError("no module named 'utime'",)
+  import time      FAIL  ImportError("no module named 'time'",)
+  import umachine  FAIL  ImportError("no module named 'umachine'",)
+  import utimeq    ok    (no time names)
+-- MicroPython utime -------------------------------------
+  no utime module (ImportError("no module named 'utime'",)): ticks_ms/time cannot be used here
+-- PPL (hpprime.eval) ------------------------------------
+  Date       -> 2026.0925
+  Time       -> 20.5491666667
+  Ticks      -> 125003.0
+  memory(1)  -> 13575756
+  Ticks      125060.0 -> 126067.0  delta 1007.0  milliseconds per tick  (waited: PPL wait(1))
+-- svc 0x100A5 GetSysTime (RISKY) ------------------------
+  using the launcher's own handle
+  stub 0x307FC468, buffer 0x00000002 (64 B, zeroed)
+  calling 0x100A5(buf, 0, 0, 0) ...
+  0x100A5 returned r0 = 0x00000002 (2)
+  buf words: 
+  buf untouched (all zero): GetSysTime takes no output buffer
+  decode: no known layout (raw words above)
+  -> neither a buffer nor a plausible timestamp: inconclusive
+  after a PPL wait(2): r0 = 0x00000002 (2)
+  buf words: 
+  changed words: NONE
+  decoded after the wait: no known layout (raw words above)
+  delta r0 = 0
+==== done (risky) ====
